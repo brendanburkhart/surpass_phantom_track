@@ -407,7 +407,7 @@ def opencv_to_igtl(image: cv.Mat, device_name="stereo_image") -> pyigtl.ImageMes
 
 
 def main(tracking: bool):
-    config_file = "./share/diy_calibration.json"
+    config_file = "./share/benchtop_system_stereo_calibration.json"
     with open(config_file, "r") as f:
         config = json.load(f)
 

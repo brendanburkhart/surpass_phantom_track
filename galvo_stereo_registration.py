@@ -103,7 +103,7 @@ def find_target(image):
     cv.imshow("target contours", image)
 
 def main():
-    config_file = "./share/diy_calibration.json"
+    config_file = "./share/benchtop_system_stereo_calibration.json"
     with open(config_file, "r") as f:
         config = json.load(f)
 
