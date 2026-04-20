@@ -1,16 +1,19 @@
+import csv
 import cv2 as cv
 import json
 import numpy as np
 from surpass_stereo import SurpassStereo
+import time
 
 class Tracker:
     def __init__(self, Q):
         self.last_left_image = None
         self.last_right_image = None
 
-        self.left_targets = []
-        self.right_targets = []
         self.targets = []
+
+        self.left_detection = (time.time(), None)
+        self.right_detection = (time.time(), None)
 
         self.Q = Q
 
@@ -28,79 +31,89 @@ class Tracker:
         P = P / P[3]
 
         return np.array([P[0], P[1], P[2]], dtype=np.float32)
+    
+    def coalesce_detection(self, existing_detection, new_detection, threshold=0.25):
+        # Have new target, use it
+        if new_detection[1] is not None:
+            return new_detection
+        
+        # No new target, but existing target is recent - use it
+        age = new_detection[0] - existing_detection[0]
+        if age < threshold:
+            return existing_detection
+        
+        return (time.time(), None)
+    
+    def add_detection(self, left, right):
+        left_ts, left_point = left
+        right_ts, right_point = right
+        y_error = abs(left_point[1] - right_point[1])
+        if y_error > 5:
+            return
+
+        closest_distance = np.inf
+        closest_index = -1
+        for idx, t in enumerate(self.targets):
+            left_mean = np.mean(t[0], axis=0)
+            right_mean = np.mean(t[1], axis=0)
+
+            dist = min(np.linalg.norm(left_mean - left_point), np.linalg.norm(right_mean - right_point))
+            if dist < closest_distance:
+                closest_distance = dist
+                closest_index = idx
+
+        if closest_distance > 15:
+            self.targets.append( ( [ left_point ], [ right_point ] ) )
+        else:
+            self.targets[closest_index][0].append(left_point)
+            self.targets[closest_index][1].append(right_point)
+
+        # Make sure we don't reuse these detections
+        self.left_detection = (time.time(), None)
+        self.right_detection = (time.time(), None)
 
     def update(self, left_image, right_image):
-        self._update(left_image, self.last_left_image, self.left_targets)
-        self._update(right_image, self.last_right_image, self.right_targets)
+        left_detection = self.find_targets(left_image, self.last_left_image, "left thresh")
+        right_detection = self.find_targets(right_image, self.last_right_image, "right thresh")
+
+        self.left_detection = self.coalesce_detection(self.left_detection, left_detection)
+        self.right_detection = self.coalesce_detection(self.right_detection, right_detection)
+
+        if self.left_detection[1] is not None and self.right_detection[1] is not None:
+            self.add_detection(self.left_detection, self.right_detection)
+
+        for target in self.targets:
+            left = np.mean(target[0], axis=0)
+            right = np.mean(target[1], axis=0)
+            cv.circle(left_image, (int(left[0]), int(left[1])), 4, (255,0,255), -1)
+            cv.circle(right_image, (int(right[0]), int(right[1])), 4, (255,0,255), -1)
+
         self.last_left_image = left_image
         self.last_right_image = right_image
 
-        print(len(self.left_targets), len(self.right_targets))
-
-        self.left_targets = sorted(self.left_targets, key=lambda t: (np.mean(t, axis=0))[1])
-        self.right_targets = sorted(self.right_targets, key=lambda t: (np.mean(t, axis=0))[1])
-
-        self.targets = [
-            self._to_3d(lt, rt) for lt, rt in zip(self.left_targets, self.right_targets)
-        ]
-
-    def _update(self, image, last_image, targets):
+    def find_targets(self, image, last_image, name):
         if last_image is None:
-            thresh = np.zeros(image.shape[:2], np.uint8)
-            return thresh
+            return (time.time(), None)
 
-        delta = cv.absdiff(last_image, image)
-        delta_gray = cv.cvtColor(delta, cv.COLOR_BGR2GRAY)
-        _, thresh = cv.threshold(delta_gray, 10, 255, cv.THRESH_BINARY)
+        # Only look for laser pulse in the red channel
+        delta = np.float32(image[:, :, 2]) - np.float32(last_image[:, :, 2])
+        _, thresh = cv.threshold(delta, 10.0, 255.0, cv.THRESH_BINARY)
+        thresh = np.uint8(thresh)
+
+        cv.imshow(name, thresh)
 
         contours, _ = cv.findContours(thresh, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
         if len(contours) > 0:
             target = max(contours, key = cv.contourArea)
             M = cv.moments(target)
-            if M["m00"] > 0:
-                cx = int(M["m10"]/M["m00"])
-                cy = int(M["m01"]/M["m00"])
+            area = M["m00"]
+            if area > 25:
+                cx = int(M["m10"]/area)
+                cy = int(M["m01"]/area)
 
-                closest_distance = np.inf
-                closest_index = -1
-                for idx, t in enumerate(targets):
-                    t_mean = np.mean(t, axis=0)
-                    dist = (t_mean[0]-cx)**2 + (t_mean[1]-cy)**2
-                    if dist < closest_distance:
-                        closest_distance = dist
-                        closest_index = idx
+                return (time.time(), np.array([cx, cy]))
 
-                if closest_distance > 35:
-                    targets.append( [ (cx, cy) ] )
-                else:
-                    targets[closest_index].append((cx, cy))
-
-        for target in targets:
-            t_mean = np.mean(target, axis=0)
-            cv.circle(image, (int(t_mean[0]), int(t_mean[1])), 4, (255,0,255), -1)
-
-        return thresh
-
-def find_target(image):
-    hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
-
-    lower = np.array([100, 100, 40], np.uint8)
-    upper = np.array([140, 255, 255], np.uint8)
-    mask = cv.inRange(hsv, lower, upper)
-
-    morph_size = 5
-    element = cv.getStructuringElement(cv.MORPH_ELLIPSE, (2*morph_size + 1, 2*morph_size+1), (morph_size, morph_size))
-    clean_mask = cv.morphologyEx(mask, cv.MORPH_OPEN, element)
-
-    contours, _ = cv.findContours(clean_mask, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
-    cv.drawContours(image, contours, -1, (0,255,0), 3)
-
-    if len(contours) > 0:
-        target = max(contours, key = cv.contourArea)
-        cv.drawContours(image, [target], -1, (0,255,255), 5)
-
-    cv.imshow("target mask", clean_mask)
-    cv.imshow("target contours", image)
+        return (time.time(), None)
 
 def main():
     config_file = "./share/benchtop_system_stereo_calibration.json"
@@ -118,13 +131,20 @@ def main():
         ok, left, right = stereo.read()
         tracker.update(left, right)
         image = np.hstack((left, right))
+        cv.putText(image, f"{len(tracker.targets)}", (100, 150), cv.FONT_HERSHEY_SIMPLEX, 4.0, (255, 0, 0), 4, cv.FILLED)
         cv.imshow("Tracking", image)
         key = cv.waitKey(20) & 0xFF
         if key == 27 or key == ord('q'):
             print("Quitting...")
-            print()
-            print(json.dumps(np.array(tracker.targets).tolist()))
             break
+
+    with open("targets.csv", "w") as f:
+        writer = csv.writer(f)
+        writer.writerow([ "left_x", "left_y", "right_x", "right_y"])
+        for t in tracker.targets:
+            left_mean = np.mean(t[0], axis=0)
+            right_mean = np.mean(t[1], axis=0)
+            writer.writerow([left_mean[0], left_mean[1], right_mean[0], right_mean[1]])
 
 if __name__ == '__main__':
     main()
