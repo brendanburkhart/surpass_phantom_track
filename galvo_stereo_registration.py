@@ -2,7 +2,7 @@ import csv
 import cv2 as cv
 import json
 import numpy as np
-from surpass_stereo import SurpassStereo
+from surpass_stereo import StereoCalibration, SeparateStereo
 import time
 
 class Tracker:
@@ -10,10 +10,9 @@ class Tracker:
         self.last_left_image = None
         self.last_right_image = None
 
+        self.left_targets = []
+        self.right_targets = []
         self.targets = []
-
-        self.left_detection = (time.time(), None)
-        self.right_detection = (time.time(), None)
 
         self.Q = Q
 
@@ -116,23 +115,36 @@ class Tracker:
         return (time.time(), None)
 
 def main():
-    config_file = "./share/benchtop_system_stereo_calibration.json"
-    with open(config_file, "r") as f:
-        config = json.load(f)
+    stereo = SeparateStereo.openDecklink(0, 1)
+    if stereo is None:
+        print("Failed to open stereo camera")
+        
+    calibration = StereoCalibration.fromJSON("./share/csr_30deg_calibration.json")
+    stereo.addCalibration(calibration)
 
-    stereo = SurpassStereo.DIY(config)
-    stereo.set_exposure(25)
+    # Todo: get from calibration
+    disparity_to_depth = np.eye(4, dtype=np.float64)
+    f = 1288.4442228002379
+    T = -5.484535539944649 / f
+    disparity_to_depth[0, 3] = -1057.8859329223633
+    disparity_to_depth[1, 3] = -578.4940795898438
+    disparity_to_depth[2, 3] = f
+    disparity_to_depth[3, 2] = -1/T
+    disparity_to_depth[3, 3] = 0.0 # zero disparity
 
-    tracker = Tracker(stereo.disparity_to_depth)
+    tracker = Tracker(disparity_to_depth)
 
-    cv.namedWindow("Tracking", cv.WND_PROP_FULLSCREEN)
+    cv.namedWindow("Tracking", cv.WINDOW_NORMAL)
 
     while True:
-        ok, left, right = stereo.read()
+        ok = stereo.capture()
+        left = stereo.leftRectified()
+        right = stereo.rightRectified()
         tracker.update(left, right)
         image = np.hstack((left, right))
         cv.putText(image, f"{len(tracker.targets)}", (100, 150), cv.FONT_HERSHEY_SIMPLEX, 4.0, (255, 0, 0), 4, cv.FILLED)
-        cv.imshow("Tracking", image)
+        display = cv.resize(image, (0,0), fx=0.25, fy=0.25)
+        cv.imshow("Tracking", display)
         key = cv.waitKey(20) & 0xFF
         if key == 27 or key == ord('q'):
             print("Quitting...")
